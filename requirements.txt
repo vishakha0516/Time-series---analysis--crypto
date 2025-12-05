@@ -1,0 +1,12 @@
+# Bitcoin Price Forecasting Dashboard - Requirements
+pandas>=1.5.0
+numpy>=1.23.0
+matplotlib>=3.6.0
+seaborn>=0.12.0
+plotly>=5.14.0
+streamlit>=1.28.0
+statsmodels>=0.14.0
+tensorflow>=2.13.0
+scikit-learn>=1.3.0
+prophet>=1.1.4
+yfinance>=0.2.28

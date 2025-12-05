@@ -1,6 +1,7 @@
 """
 Bitcoin Price Analysis & Forecasting Dashboard
 Interactive Streamlit application for cryptocurrency time series analysis
+with REAL-TIME data updates every 1 minute
 """
 
 import streamlit as st
@@ -13,6 +14,8 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import warnings
+import time
+import yfinance as yf
 warnings.filterwarnings('ignore')
 
 # Time series libraries
@@ -65,8 +68,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Title and description
-st.title("₿ Bitcoin Price Forecasting Dashboard")
-st.markdown("### Advanced Time Series Analysis with ARIMA, LSTM & Prophet")
+st.title("₿ Bitcoin Real-Time Forecasting Dashboard")
+st.markdown("### 🔴 LIVE: Auto-updates every 60 seconds | 7-Day Predictions")
+
+# Display last update time
+if 'last_update' not in st.session_state:
+    st.session_state['last_update'] = datetime.now()
+
+col1, col2, col3 = st.columns([2, 1, 1])
+with col1:
+    st.markdown(f"**Last Updated:** {st.session_state['last_update'].strftime('%Y-%m-%d %H:%M:%S')}")
+with col2:
+    if st.button("🔄 Refresh Now"):
+        st.rerun()
+with col3:
+    auto_refresh = st.checkbox("Auto-Refresh", value=True)
+
 st.markdown("---")
 
 # Sidebar
@@ -74,13 +91,34 @@ with st.sidebar:
     st.image("https://cryptologos.cc/logos/bitcoin-btc-logo.png", width=100)
     st.title("⚙️ Settings")
     
-    # File uploader
-    uploaded_file = st.file_uploader("Upload Bitcoin CSV", type=['csv'])
+    # Data source selection
+    st.subheader("📊 Data Source")
+    data_source = st.radio(
+        "Select Data Source",
+        ["🔴 Real-Time (Live)", "📁 Upload CSV"],
+        index=0
+    )
+    
+    if data_source == "📁 Upload CSV":
+        uploaded_file = st.file_uploader("Upload Bitcoin CSV", type=['csv'])
+    else:
+        uploaded_file = None
+        st.info("🔴 Fetching live data from Yahoo Finance")
+        
+        # Historical data range
+        data_period = st.selectbox(
+            "Historical Data Range",
+            ["1mo", "3mo", "6mo", "1y", "2y"],
+            index=2
+        )
     
     # Model parameters
     st.subheader("Model Parameters")
     train_split = st.slider("Train/Test Split (%)", 60, 90, 80, 5)
-    forecast_days = st.slider("Forecast Days", 7, 60, 30, 1)
+    
+    # Fixed to 7 days for weekly prediction
+    st.markdown("**Forecast Period:** 7 Days (1 Week)")
+    forecast_days = 7
     
     # ARIMA parameters
     with st.expander("ARIMA Parameters"):
@@ -98,9 +136,92 @@ with st.sidebar:
     run_analysis = st.button("🚀 Run Analysis", type="primary", use_container_width=True)
 
 # Helper functions
-@st.cache_data
+@st.cache_data(ttl=60)  # Cache for 60 seconds
+def load_realtime_data(period="6mo"):
+    """Fetch real-time Bitcoin data from Yahoo Finance"""
+    
+    # Try multiple Bitcoin tickers
+    tickers_to_try = [
+        ("BTC-USD", "Bitcoin USD"),
+        ("BTC-EUR", "Bitcoin EUR"),
+        ("BTCUSD=X", "Bitcoin USD (Forex)"),
+    ]
+    
+    for ticker, name in tickers_to_try:
+        try:
+            st.info(f"🔄 Trying {name} ({ticker})...")
+            
+            # Calculate date range - ensure we don't go into future
+            end_date = datetime.now() - timedelta(days=1)  # Yesterday
+            
+            if period == "1mo":
+                start_date = end_date - timedelta(days=30)
+            elif period == "3mo":
+                start_date = end_date - timedelta(days=90)
+            elif period == "6mo":
+                start_date = end_date - timedelta(days=180)
+            elif period == "1y":
+                start_date = end_date - timedelta(days=365)
+            else:  # 2y
+                start_date = end_date - timedelta(days=730)
+            
+            # Try downloading with period first (most reliable)
+            df = yf.download(
+                ticker, 
+                period=period,
+                progress=False,
+                interval='1d',
+                timeout=10
+            )
+            
+            if not df.empty:
+                st.success(f"✅ Successfully fetched data using {name}")
+                break
+                
+        except Exception as e:
+            st.warning(f"Failed with {name}: {str(e)[:100]}")
+            continue
+    
+    if df.empty:
+        st.error("❌ All ticker symbols failed")
+        st.warning("Yahoo Finance API may be experiencing issues. Using local CSV data instead.")
+        return None
+    
+    try:
+        # Clean and prepare data
+        df.index = pd.to_datetime(df.index)
+        
+        # Handle MultiIndex columns if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        
+        # Ensure we have the required columns
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        if missing_cols:
+            st.error(f"❌ Missing columns: {missing_cols}")
+            return None
+        
+        df = df[required_cols]
+        
+        # Add Price column (same as Close)
+        df['Price'] = df['Close']
+        
+        # Remove any NaN values
+        df = df.dropna()
+        
+        st.session_state['last_update'] = datetime.now()
+        st.success(f"✅ Loaded {len(df)} days | Latest: {df.index[-1].strftime('%Y-%m-%d')} | Price: ${df['Close'].iloc[-1]:,.2f}")
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"❌ Error processing data: {type(e).__name__}: {str(e)}")
+        return None
+
 def load_data(file_path=None):
-    """Load and preprocess Bitcoin data"""
+    """Load and preprocess Bitcoin data from CSV"""
     try:
         if file_path:
             df = pd.read_csv(file_path, header=[0, 1], index_col=0)
@@ -131,14 +252,33 @@ def create_price_chart(df, title="Bitcoin Price History"):
     """Create interactive price chart with Plotly"""
     fig = go.Figure()
     
+    # Add area under curve
     fig.add_trace(go.Scatter(
         x=df.index, y=df['Close'],
         mode='lines',
         name='Close Price',
         line=dict(color='#f8a300', width=2),
-        fill='tonexty',
-        fillcolor='rgba(248, 163, 0, 0.1)'
+        fill='tozeroy',
+        fillcolor='rgba(248, 163, 0, 0.1)',
+        hovertemplate='<b>Date</b>: %{x}<br><b>Price</b>: $%{y:,.2f}<extra></extra>'
     ))
+    
+    # Add current price annotation
+    current_price = df['Close'].iloc[-1]
+    fig.add_annotation(
+        x=df.index[-1],
+        y=current_price,
+        text=f"🔴 ${current_price:,.2f}",
+        showarrow=True,
+        arrowhead=2,
+        arrowsize=1,
+        arrowwidth=2,
+        arrowcolor="#f8a300",
+        bgcolor="#1e2130",
+        bordercolor="#f8a300",
+        borderwidth=2,
+        font=dict(size=14, color="white")
+    )
     
     fig.update_layout(
         title=title,
@@ -337,12 +477,27 @@ def create_forecast_comparison_chart(df_ts, arima_forecast, lstm_forecast, proph
         hoverinfo='skip'
     ))
     
-    # Forecast start line
-    fig.add_vline(
-        x=df_ts.index[-1],
-        line_dash="dash",
-        line_color="red",
-        annotation_text="Forecast Start"
+    # Add vertical line at forecast start using shape (more reliable than add_vline)
+    forecast_start_date = df_ts.index[-1]
+    
+    fig.add_shape(
+        type="line",
+        x0=forecast_start_date,
+        x1=forecast_start_date,
+        y0=0,
+        y1=1,
+        yref="paper",
+        line=dict(color="red", width=2, dash="dash")
+    )
+    
+    fig.add_annotation(
+        x=forecast_start_date,
+        y=1,
+        yref="paper",
+        text="Forecast Start",
+        showarrow=False,
+        yshift=10,
+        font=dict(color="red")
     )
     
     fig.update_layout(
@@ -363,7 +518,17 @@ def create_forecast_comparison_chart(df_ts, arima_forecast, lstm_forecast, proph
     return fig
 
 # Main application
-if uploaded_file:
+if data_source == "🔴 Real-Time (Live)":
+    df = load_realtime_data(period=data_period)
+    
+    # Fallback to local CSV if real-time fails
+    if df is None:
+        st.warning("⚠️ Falling back to local CSV file...")
+        df = load_data()
+        if df is not None:
+            st.info("✅ Using local CSV data instead")
+        
+elif uploaded_file:
     df = load_data(uploaded_file)
 else:
     df = load_data()
@@ -376,26 +541,31 @@ if df is not None:
     
     col1, col2, col3, col4, col5 = st.columns(5)
     
+    current_price = df_ts['Close'].iloc[-1]
+    prev_price = df_ts['Close'].iloc[-2]
+    price_change_24h = ((current_price / prev_price) - 1) * 100
+    
     with col1:
         st.metric(
-            "Current Price",
-            f"${df_ts['Close'].iloc[-1]:,.2f}",
-            f"{((df_ts['Close'].iloc[-1] / df_ts['Close'].iloc[-2]) - 1) * 100:+.2f}%"
+            "🔴 LIVE Price",
+            f"${current_price:,.2f}",
+            f"{price_change_24h:+.2f}%",
+            delta_color="normal"
         )
     
     with col2:
-        st.metric("24h High", f"${df['High'].iloc[-1]:,.2f}")
+        st.metric("📈 24h High", f"${df['High'].iloc[-1]:,.2f}")
     
     with col3:
-        st.metric("24h Low", f"${df['Low'].iloc[-1]:,.2f}")
+        st.metric("📉 24h Low", f"${df['Low'].iloc[-1]:,.2f}")
     
     with col4:
         price_change = df_ts['Close'].iloc[-1] - df_ts['Close'].iloc[0]
         pct_change = (price_change / df_ts['Close'].iloc[0]) * 100
-        st.metric("Period Change", f"${price_change:,.2f}", f"{pct_change:+.2f}%")
+        st.metric("📊 Period Change", f"${price_change:,.2f}", f"{pct_change:+.2f}%")
     
     with col5:
-        st.metric("Avg Volume", f"{df['Volume'].mean():,.0f}")
+        st.metric("💹 Avg Volume", f"{df['Volume'].mean()/1e9:.2f}B")
     
     st.markdown("---")
     
@@ -522,6 +692,26 @@ if df is not None:
                 )
                 arima_future = future_forecast[-forecast_days:]
                 
+                # Calculate 7-day targets
+                day_7_price = arima_future.iloc[-1]
+                current_btc_price = df_ts['Close'].iloc[-1]
+                week_change = day_7_price - current_btc_price
+                week_change_pct = (week_change / current_btc_price) * 100
+                
+                # Display 7-day prediction
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Current Price", f"${current_btc_price:,.2f}")
+                with col2:
+                    st.metric(
+                        "7-Day Prediction",
+                        f"${day_7_price:,.2f}",
+                        f"{week_change_pct:+.2f}%"
+                    )
+                with col3:
+                    direction = "📈 BULLISH" if week_change > 0 else "📉 BEARISH"
+                    st.metric("Trend", direction)
+                
                 # Store for comparison
                 st.session_state['arima_future'] = arima_future
                 st.session_state['arima_metrics'] = (arima_mae, arima_rmse, arima_mape, arima_r2)
@@ -539,10 +729,13 @@ if df is not None:
                     marker=dict(size=6)
                 ))
                 
-                fig.add_vline(
-                    x=df_ts.index[-1],
-                    line_dash="dash",
-                    line_color="red"
+                # Add vertical line at forecast start using shape
+                forecast_start = df_ts.index[-1]
+                fig.add_shape(
+                    type="line",
+                    x0=forecast_start, x1=forecast_start,
+                    y0=0, y1=1, yref="paper",
+                    line=dict(color="red", width=2, dash="dash")
                 )
                 
                 fig.update_layout(
@@ -639,7 +832,27 @@ if df is not None:
                 st.session_state['lstm_future'] = lstm_future
                 st.session_state['lstm_metrics'] = (lstm_mae, lstm_rmse, lstm_mape, lstm_r2)
                 
-                st.subheader(f"📅 {forecast_days}-Day Future Forecast")
+                # Calculate 7-day targets
+                day_7_price = lstm_future[-1][0]
+                current_btc_price = df_ts['Close'].iloc[-1]
+                week_change = day_7_price - current_btc_price
+                week_change_pct = (week_change / current_btc_price) * 100
+                
+                st.subheader(f"📅 7-Day Future Forecast")
+                
+                # Display 7-day prediction
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Current Price", f"${current_btc_price:,.2f}")
+                with col2:
+                    st.metric(
+                        "7-Day Prediction",
+                        f"${day_7_price:,.2f}",
+                        f"{week_change_pct:+.2f}%"
+                    )
+                with col3:
+                    direction = "📈 BULLISH" if week_change > 0 else "📉 BEARISH"
+                    st.metric("Trend", direction)
                 
                 future_dates = pd.date_range(
                     start=df_ts.index[-1] + timedelta(days=1),
@@ -660,7 +873,14 @@ if df is not None:
                     marker=dict(size=6, symbol='square')
                 ))
                 
-                fig.add_vline(x=df_ts.index[-1], line_dash="dash", line_color="red")
+                # Add vertical line at forecast start using shape
+                forecast_start = df_ts.index[-1]
+                fig.add_shape(
+                    type="line",
+                    x0=forecast_start, x1=forecast_start,
+                    y0=0, y1=1, yref="paper",
+                    line=dict(color="red", width=2, dash="dash")
+                )
                 
                 fig.update_layout(
                     title=f"LSTM: {forecast_days}-Day Future Forecast",
@@ -748,6 +968,29 @@ if df is not None:
                 prophet_future_forecast = prophet_model.predict(future)
                 prophet_future = prophet_future_forecast.tail(forecast_days)
                 
+                # Calculate 7-day targets
+                day_7_price = prophet_future['yhat'].iloc[-1]
+                day_7_lower = prophet_future['yhat_lower'].iloc[-1]
+                day_7_upper = prophet_future['yhat_upper'].iloc[-1]
+                current_btc_price = df_ts['Close'].iloc[-1]
+                week_change = day_7_price - current_btc_price
+                week_change_pct = (week_change / current_btc_price) * 100
+                
+                # Display 7-day prediction with confidence
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Current Price", f"${current_btc_price:,.2f}")
+                with col2:
+                    st.metric(
+                        "7-Day Prediction",
+                        f"${day_7_price:,.2f}",
+                        f"{week_change_pct:+.2f}%"
+                    )
+                with col3:
+                    st.metric("Best Case", f"${day_7_upper:,.2f}")
+                with col4:
+                    st.metric("Worst Case", f"${day_7_lower:,.2f}")
+                
                 # Store for comparison
                 st.session_state['prophet_future'] = prophet_future
                 st.session_state['prophet_metrics'] = (prophet_mae, prophet_rmse, prophet_mape, prophet_r2)
@@ -778,7 +1021,14 @@ if df is not None:
                     fill='tonexty', name='Confidence Interval'
                 ))
                 
-                fig.add_vline(x=df_ts.index[-1], line_dash="dash", line_color="red")
+                # Add vertical line at forecast start using shape
+                forecast_start = df_ts.index[-1]
+                fig.add_shape(
+                    type="line",
+                    x0=forecast_start, x1=forecast_start,
+                    y0=0, y1=1, yref="paper",
+                    line=dict(color="red", width=2, dash="dash")
+                )
                 
                 fig.update_layout(
                     title=f"Prophet: {forecast_days}-Day Future Forecast",
@@ -890,31 +1140,35 @@ if df is not None:
                     
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Ensemble forecast
-                    ensemble_forecast = (
-                        st.session_state['arima_future'].flatten() +
-                        st.session_state['lstm_future'].flatten() +
-                        st.session_state['prophet_future']['yhat'].values
-                    ) / 3
+                    # Ensemble forecast - handle both Series and ndarray
+                    arima_values = st.session_state['arima_future'].values if hasattr(st.session_state['arima_future'], 'values') else st.session_state['arima_future'].flatten()
+                    lstm_values = st.session_state['lstm_future'].flatten()
+                    prophet_values = st.session_state['prophet_future']['yhat'].values
+                    
+                    ensemble_forecast = (arima_values + lstm_values + prophet_values) / 3
                     
                     st.subheader("🎯 Forecast Summary")
+                    
+                    # Get values safely
+                    arima_day1 = st.session_state['arima_future'].iloc[0] if hasattr(st.session_state['arima_future'], 'iloc') else st.session_state['arima_future'][0]
+                    arima_last = st.session_state['arima_future'].iloc[-1] if hasattr(st.session_state['arima_future'], 'iloc') else st.session_state['arima_future'][-1]
                     
                     summary_df = pd.DataFrame({
                         'Model': ['ARIMA', 'LSTM', 'Prophet', 'Ensemble Average'],
                         'Day 1': [
-                            f"${st.session_state['arima_future'][0]:,.2f}",
+                            f"${arima_day1:,.2f}",
                             f"${st.session_state['lstm_future'][0][0]:,.2f}",
                             f"${st.session_state['prophet_future']['yhat'].iloc[0]:,.2f}",
                             f"${ensemble_forecast[0]:,.2f}"
                         ],
                         f'Day {forecast_days}': [
-                            f"${st.session_state['arima_future'][-1]:,.2f}",
+                            f"${arima_last:,.2f}",
                             f"${st.session_state['lstm_future'][-1][0]:,.2f}",
                             f"${st.session_state['prophet_future']['yhat'].iloc[-1]:,.2f}",
                             f"${ensemble_forecast[-1]:,.2f}"
                         ],
                         'Change (%)': [
-                            f"{((st.session_state['arima_future'][-1] / df_ts['Close'].iloc[-1]) - 1) * 100:+.2f}%",
+                            f"{((arima_last / df_ts['Close'].iloc[-1]) - 1) * 100:+.2f}%",
                             f"{((st.session_state['lstm_future'][-1][0] / df_ts['Close'].iloc[-1]) - 1) * 100:+.2f}%",
                             f"{((st.session_state['prophet_future']['yhat'].iloc[-1] / df_ts['Close'].iloc[-1]) - 1) * 100:+.2f}%",
                             f"{((ensemble_forecast[-1] / df_ts['Close'].iloc[-1]) - 1) * 100:+.2f}%"
@@ -923,11 +1177,56 @@ if df is not None:
                     
                     st.dataframe(summary_df, use_container_width=True, hide_index=True)
                     
+                    # 7-Day Summary Box
+                    st.subheader("🎯 7-Day Forecast Summary")
+                    
+                    avg_7day = ensemble_forecast[-1]
+                    week_change_ensemble = avg_7day - df_ts['Close'].iloc[-1]
+                    week_pct_ensemble = (week_change_ensemble / df_ts['Close'].iloc[-1]) * 100
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.info(f"""
+                        **📅 Current Date:** {df_ts.index[-1].strftime('%Y-%m-%d')}  
+                        **💰 Current Price:** ${df_ts['Close'].iloc[-1]:,.2f}
+                        """)
+                    with col2:
+                        if week_change_ensemble > 0:
+                            st.success(f"""
+                            **🎯 7-Day Target:** ${avg_7day:,.2f}  
+                            **📈 Expected Gain:** ${week_change_ensemble:,.2f}  
+                            **📊 Percentage:** +{week_pct_ensemble:.2f}%  
+                            **🚀 Signal:** BULLISH
+                            """)
+                        else:
+                            st.error(f"""
+                            **🎯 7-Day Target:** ${avg_7day:,.2f}  
+                            **📉 Expected Loss:** ${week_change_ensemble:,.2f}  
+                            **📊 Percentage:** {week_pct_ensemble:.2f}%  
+                            **⚠️ Signal:** BEARISH
+                            """)
+                    with col3:
+                        arima_pct = ((arima_last / df_ts['Close'].iloc[-1]) - 1) * 100
+                        lstm_pct = ((st.session_state['lstm_future'][-1][0] / df_ts['Close'].iloc[-1]) - 1) * 100
+                        prophet_pct = ((st.session_state['prophet_future']['yhat'].iloc[-1] / df_ts['Close'].iloc[-1]) - 1) * 100
+                        
+                        st.warning(f"""
+                        **🤖 Models Agreement:**  
+                        - ARIMA: {arima_pct:+.2f}%  
+                        - LSTM: {lstm_pct:+.2f}%  
+                        - Prophet: {prophet_pct:+.2f}%
+                        """)
+                    
             else:
                 st.info("👆 Please run all models first to see the comparison!")
     
     else:
         st.info("👈 Click 'Run Analysis' in the sidebar to start forecasting!")
+    
+    # Auto-refresh functionality
+    if auto_refresh and data_source == "🔴 Real-Time (Live)":
+        time.sleep(60)  # Wait 60 seconds
+        st.rerun()
 
 else:
     st.error("❌ Unable to load data. Please check the file path or upload a CSV file.")
@@ -936,7 +1235,8 @@ else:
 st.markdown("---")
 st.markdown("""
     <div style='text-align: center; color: #888;'>
-        <p>Bitcoin Price Forecasting Dashboard | Built with Streamlit</p>
-        <p>Models: ARIMA • LSTM • Facebook Prophet</p>
+        <p>🔴 Real-Time Bitcoin Forecasting Dashboard | Auto-Updates Every 60 Seconds</p>
+        <p>Models: ARIMA • LSTM • Facebook Prophet | 7-Day Predictions</p>
+        <p style='font-size: 12px;'>Data Source: Yahoo Finance (BTC-USD) | Built with Streamlit & yfinance</p>
     </div>
 """, unsafe_allow_html=True)
